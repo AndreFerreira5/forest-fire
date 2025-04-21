@@ -1,0 +1,11 @@
+[project]
+name = "forest-fire"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.10"
+dependencies = [
+    "noise>=1.2.2",
+    "numpy>=2.2.4",
+    "scipy>=1.15.2",
+    "simcx",
+]
