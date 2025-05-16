@@ -12,7 +12,16 @@ random.seed(0)
 
 
 class Forest:
-    def __init__(self, dimensions, p_tree=0.5, density=6.0, noise_octaves=4, seed=0):
+    def __init__(
+            self,
+            dimensions,
+            p_tree=0.5,
+            density=6.0,
+            noise_octaves=4,
+            seed=0,
+            wind_dir=(0, 0),
+            wind_speed=2.0
+    ):
         self.H, self.W = dimensions
         self.board = np.zeros(dimensions)
         self.p_tree = p_tree
@@ -21,6 +30,11 @@ class Forest:
         self.seed = seed
         self.kernel = np.ones((3, 3), dtype=np.uint8)
         self.kernel[1,1] = 0
+
+        # wind
+        self.wind_dir = np.asarray(wind_dir, dtype=float)
+        self.wind_dir /= np.hypot(*self.wind_dir) + 1e-9 # normalise so that ||wind_dir|| == 1 even if a diagonal is supplied
+        self.wind_speed = float(wind_speed)
         self.wind_vectors = [
 
         ]
@@ -75,8 +89,17 @@ class Forest:
         mask = np.zeros(board.shape, dtype=bool)
         for i, j in burning_cells:
             if rng.random() < self.spotting_prob:
-                distance = rng.triangular(left=2, mode=3, right=self.spotting_range) # Random distance with triangular distribution
-                angle = rng.uniform(0, 2 * np.pi) # Random direction for ember travel
+                base_distance = rng.triangular(left=2, mode=3, right=self.spotting_range)
+                angle_variation = rng.uniform(-np.pi / 4, np.pi / 4)  # ±45° around main flow
+
+                # Wind direction in polar form
+                wind_angle = np.arctan2(self.wind_dir[0], self.wind_dir[1])
+
+                # Drift: farther & more aligned with stronger wind
+                distance = base_distance * (1.0 + 0.7 * self.wind_speed)
+                angle = wind_angle + angle_variation
+                #distance = rng.triangular(left=2, mode=3, right=self.spotting_range) # Random distance with triangular distribution
+                #angle = rng.uniform(0, 2 * np.pi) # Random direction for ember travel
 
                 # Convert angle to cell coordinates
                 di = int(np.round(distance * np.cos(angle)))
@@ -143,6 +166,17 @@ class Forest:
                         prob = (self.ignition_base_prob *
                                 np.exp(-self.radiant_decay * (distance - 1)))
 
+                    # wind amplification
+                    # Dot-product gives cosθ between wind and [di, dj] (range −1…1)
+                    cos_theta = (np.array([di, dj], dtype=float) @ self.wind_dir) / (distance + 1e-9)
+
+                    # Cells exactly down-wind get prob × (1 + wind_speed)
+                    # Cells exactly up-wind get prob × (1 – wind_speed)   (floored at zero)
+                    wind_factor = 1.0 + self.wind_speed * cos_theta
+                    wind_factor = np.clip(wind_factor, 0.0, None)  # never negative
+
+                    prob *= wind_factor
+
                     # Store ONLY the strongest influence so far
                     if prob > prob_map[ni, nj]:
                         prob_map[ni, nj] = prob
@@ -192,7 +226,7 @@ class Forest:
 
 def main():
     FOREST_DIMENSIONS = (100, 100)
-    forest = Forest(FOREST_DIMENSIONS, density=100, noise_octaves=30, p_tree=0.4)
+    forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4)
     forest.render()
 
     for _ in range(5):
