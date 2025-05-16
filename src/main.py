@@ -2,11 +2,13 @@ import random
 
 import numpy as np
 from noise import pnoise2
+from numpy.f2py.crackfortran import dimensionpattern
 from scipy.signal import convolve2d
 import plotly.express as px
 
-
-rng = np.random.default_rng()
+# Seeds for repeatability
+rng = np.random.default_rng(seed=0)
+random.seed(0)
 
 
 class Forest:
@@ -22,6 +24,17 @@ class Forest:
         self.wind_vectors = [
 
         ]
+
+        # Spread parameters
+        self.radiant_decay = 0.4 # Radiant heat decay (nearby cells) - crown
+        self.ignition_base_prob = 0.8 # Ignition chance for adjacent cells
+        self.max_ignition_distance = 3 # For direct/radiant heat
+
+        # Fire spotting parameters
+        self.spotting_prob = 0.01
+        self.spotting_range = 15
+
+        self.heat_kernel = self.create_heat_kernel()
         self.init_perlin()
 
 
@@ -29,7 +42,52 @@ class Forest:
         for i in range(self.H):
             for j in range(self.W):
                 n = pnoise2(i/self.scale, j/self.scale, octaves=self.noise_octaves, base=self.seed)
-                self.board[i, j] = (1 if random.random()<self.p_tree else 2) if (n + 1)/2 < self.p_tree else 0
+                self.board[i, j] = 1 if (n + 1)/2 < self.p_tree else 0
+
+        # Set a single random tree on fire
+        trees = np.argwhere(self.board == 1)  # Coordinates of all good trees
+        if len(trees) > 0:
+            idx = rng.integers(0, len(trees))  # Random index
+            i, j = trees[idx]
+            self.board[i, j] = 2
+
+
+    def create_heat_kernel(self):
+        """Create a Gaussian-like kernel for fire spread"""
+        size = 2 * self.max_ignition_distance + 1
+        kernel = np.zeros((size, size))
+        center = self.max_ignition_distance
+
+        for i in range(size):
+            for j in range(size):
+                distance = np.hypot(i - center, j - center)
+                if distance <= 1:  # Direct neighbors (Moore neighborhood)
+                    kernel[i, j] = self.ignition_base_prob
+                elif 1 < distance <= self.max_ignition_distance:
+                    # Sharp decay for non-adjacent cells
+                    kernel[i, j] = self.ignition_base_prob * np.exp(-self.radiant_decay * (distance - 1))
+        return kernel
+
+
+    def fire_spotting(self, board):
+        """Simulates fire spotting (embers or leaves flying away and starting secondary fires)"""
+        burning_cells = np.argwhere(self.board == 2)
+        mask = np.zeros(board.shape, dtype=bool)
+        for i, j in burning_cells:
+            if rng.random() < self.spotting_prob:
+                distance = rng.triangular(left=2, mode=3, right=self.spotting_range) # Random distance with triangular distribution
+                angle = rng.uniform(0, 2 * np.pi) # Random direction for ember travel
+
+                # Convert angle to cell coordinates
+                di = int(np.round(distance * np.cos(angle)))
+                dj = int(np.round(distance * np.sin(angle)))
+
+                # Check if there is a tree at the landing location
+                if (i + di) < self.H and (j + dj) < self.W:
+                    ni, nj = (i + di), (j + dj)
+                    if mask[ni, nj] == 1:
+                        mask[ni, nj] = 2
+        return mask
 
 
     def count_neighbors(self):
@@ -40,27 +98,65 @@ class Forest:
         return empty_neighbors, good_neighbors, burning_neighbors, burned_neighbors
 
     def step(self):
-        # unpack neighbor counts for each of the four states
-        c0, c1, c2, c3 = self.count_neighbors()
+        burning_cells = np.argwhere(self.board == 2)
 
-        # prepare an empty board for next generation
-        next_board = np.empty_like(self.board, dtype=np.uint8)
+        # Prepare next board
+        next_board = np.copy(self.board)
 
-        # 0 (empty) → stays 0
-        next_board[self.board == 0] = 0
-
-        # 1 (alive) → if any burning neighbor, become 2; otherwise stay 1
-        alive = (self.board == 1)
-        next_board[alive & (c2 > 0)] = 2
-        next_board[alive & (c2 == 0)] = 1
-
-        # 2 (burning) → always become 3 (burned)
+        # Rule 1: Burning trees become burned
         next_board[self.board == 2] = 3
 
-        # 3 (burned) → stays 3
-        next_board[self.board == 3] = 3
+        # Rule 2: Direct and radiant heat spread
+        # Build per-cell ignition probabilities (highest influence rule)
+        prob_map = np.zeros_like(self.board)
 
-        # swap in the new board
+        for i, j in burning_cells:
+            for di in range(-self.max_ignition_distance,
+                            self.max_ignition_distance + 1):
+                for dj in range(-self.max_ignition_distance,
+                                self.max_ignition_distance + 1):
+
+                    if di == 0 and dj == 0:
+                        continue  # the burning cell itself
+
+                    # Current cell coordinates
+                    ni = i + di
+                    nj = j + dj
+
+                    # Ignore if out of bounds
+                    if ni >= self.H or nj >= self.W:
+                        continue
+
+                    # Euclidean distance from the burning cell
+                    distance = np.hypot(di, dj)
+
+                    # Skip cells beyond the configured range
+                    if distance > self.max_ignition_distance:
+                        continue
+
+                    # Direct neighbours
+                    if distance <= 1:
+                        prob = self.ignition_base_prob
+
+                    # Radiant heat (sharp exponential decay)
+                    else:
+                        prob = (self.ignition_base_prob *
+                                np.exp(-self.radiant_decay * (distance - 1)))
+
+                    # Store ONLY the strongest influence so far
+                    if prob > prob_map[ni, nj]:
+                        prob_map[ni, nj] = prob
+
+        # Perform ignitions on currently good trees
+        good_trees = self.board == 1
+        rand_vals = rng.random(self.board.shape)
+        ignite_mask = good_trees & (rand_vals < prob_map)
+        next_board[ignite_mask] = 2
+
+        # Rule 3: Apply fire spotting
+        spotting_mask = self.fire_spotting(self.board)
+        next_board[spotting_mask] = 2
+
         self.board = next_board
 
 
@@ -95,8 +191,8 @@ class Forest:
 
 
 def main():
-    FOREST_DIMENSIONS = (20, 40)
-    forest = Forest(FOREST_DIMENSIONS, density=2, noise_octaves=30, p_tree=0.4)
+    FOREST_DIMENSIONS = (100, 100)
+    forest = Forest(FOREST_DIMENSIONS, density=100, noise_octaves=30, p_tree=0.4)
     forest.render()
 
     for _ in range(5):
