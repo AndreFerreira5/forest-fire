@@ -146,8 +146,9 @@ class Forest:
                 # Check if there is a tree at the landing location
                 if (i + di) < self.H and (j + dj) < self.W:
                     ni, nj = (i + di), (j + dj)
-                    if mask[ni, nj] == 1:
-                        mask[ni, nj] = 2
+                    if 0 <= ni < self.H and 0 <= nj < self.W:
+                        if mask[ni, nj] == 1:
+                            mask[ni, nj] = 2
         return mask
 
 
@@ -181,6 +182,8 @@ class Forest:
                     # Current cell coordinates
                     ni = i + di
                     nj = j + dj
+                    if ni < 0 or nj < 0 or ni >= self.H or nj >= self.W:
+                        continue
 
                     # Ignore if out of bounds
                     if ni >= self.H or nj >= self.W:
