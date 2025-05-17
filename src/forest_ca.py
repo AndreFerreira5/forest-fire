@@ -4,12 +4,16 @@ import numpy as np
 from noise import pnoise2
 from numpy.f2py.crackfortran import dimensionpattern
 from scipy.signal import convolve2d
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import plotly.express as px
 
 # Seeds for repeatability
 rng = np.random.default_rng(seed=0)
 random.seed(0)
 
+INT32_MAX = 2_147_483_647
+INT32_MIN = -2_147_483_648
 
 class Forest:
     def __init__(
@@ -22,14 +26,22 @@ class Forest:
             wind_dir=(0, 0),
             wind_speed=2.0
     ):
+        self.n_steps = 0
         self.H, self.W = dimensions
         self.board = np.zeros(dimensions)
         self.p_tree = p_tree
         self.scale = density
         self.noise_octaves = noise_octaves
-        self.seed = seed
+        self.seed = int(seed)
+        if self.seed > INT32_MAX:
+            self.seed -= 2 * INT32_MAX
         self.kernel = np.ones((3, 3), dtype=np.uint8)
         self.kernel[1,1] = 0
+
+        # trees stats history
+        self.alive_trees_hist = []
+        self.burning_trees_hist = []
+        self.burned_trees_hist = []
 
         # wind
         self.wind_dir = np.asarray(wind_dir, dtype=float)
@@ -121,7 +133,12 @@ class Forest:
         return empty_neighbors, good_neighbors, burning_neighbors, burned_neighbors
 
     def step(self):
+        self.n_steps += 1
+
         burning_cells = np.argwhere(self.board == 2)
+        self.burning_trees_hist.append(len(burning_cells))
+        self.alive_trees_hist.append(len(np.argwhere(self.board == 1)))
+        self.burned_trees_hist.append(len(np.argwhere(self.board == 3)))
 
         # Prepare next board
         next_board = np.copy(self.board)
@@ -226,12 +243,45 @@ class Forest:
 
 def main():
     FOREST_DIMENSIONS = (100, 100)
-    forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4)
+    forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4, wind_dir=(1, 1))
     forest.render()
 
-    for _ in range(5):
+    STEPS = 200
+    for _ in range(STEPS):
         forest.step()
-        forest.render()
+        #forest.render()
+
+    n_steps = list(range(1, STEPS+1))
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=("Alive Trees Over Time", "Burning Trees Over Time", "Burned Trees Over Time"),
+        horizontal_spacing=0.08,
+        vertical_spacing=0.1
+    )
+
+    fig.add_trace(
+        go.Scatter(x=n_steps, y=forest.alive_trees_hist, name="Alive Trees Over Time"),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Scatter(x=n_steps, y=forest.burning_trees_hist, name="Burning Trees Over Time"),
+        row=1, col=2
+    )
+
+    fig.add_trace(
+        go.Scatter(x=n_steps, y=forest.burned_trees_hist, name="Burned Trees Over Time"),
+        row=2, col=1
+    )
+
+    fig.update_layout(
+        title_text="Forest Statistics Over Time",
+        showlegend=False,
+        height=600, width=650
+    )
+
+    fig.show()
 
 
 if __name__ == "__main__":
