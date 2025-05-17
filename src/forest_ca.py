@@ -37,6 +37,8 @@ class Forest:
             spotting_prob=0.01,
             spotting_range=15
     ):
+        print(seed)
+
         self.n_steps = 0 # number of steps
 
         # board
@@ -44,7 +46,7 @@ class Forest:
         self.board = np.zeros(dimensions)
 
         # probabilities
-        self.p_tree = p_tree
+        self.p_tree = float(p_tree)
         self.p_grow = float(p_grow)
         self.f_lightning = float(f_lightning)
 
@@ -243,7 +245,7 @@ class Forest:
         # ── fire-event accounting ──────────────────────────────────────────────
         burning_now = self.burning_trees_hist[-1]
 
-        if self._prev_burning > 0 and burning_now == 0:  # fire just ended
+        if self._prev_burning > 0 and burning_now == 0 and self.n_steps > 1:  # fire just ended
             burned_this_event = self.burned_trees_hist[-1] - self.burned_trees_hist[-2]
             if burned_this_event:  # ignore zero-size blips
                 self.fire_sizes.append(int(burned_this_event))
@@ -302,25 +304,21 @@ class Forest:
         plt.savefig(f"{save_dir}/frame_{self.n_steps:04d}.png", bbox_inches='tight', pad_inches=0.1)
         plt.close()
 
-    def cluster_stats(self):
-        """
-        Returns:
-            sizes (np.ndarray) – 1-D array of all tree-cluster sizes
-            stats (dict)       – {'n_clusters', 'largest', 'mean'}
-        """
-        labels, n_clust = label(self.board == 1, structure=np.ones((3, 3)))
-        if n_clust:
-            sizes = np.bincount(labels.ravel())[1:]  # skip background 0
-            stats = dict(
-                n_clusters=int(n_clust),
-                largest_cluster=int(sizes.max()),
-                mean_cluster=float(sizes.mean()),
-            )
-        else:
-            sizes = np.empty(0, dtype=int)
-            stats = dict(n_clusters=0, largest_cluster=0, mean_cluster=0.0)
-        return sizes, stats
 
+    def cluster_stats(self):
+        labels, n_clust = label(self.board == 1, structure=np.ones((3, 3)))
+
+        sizes = np.bincount(labels.ravel())[1:] if n_clust else np.empty(0, int)
+
+        if sizes.size:
+            largest = int(sizes.max())
+            mean = float(sizes.mean())
+        else:
+            largest = 0
+            mean = 0.0
+
+        return sizes, dict(n_clusters=int(n_clust), largest_cluster=largest,
+                           mean_cluster=mean)
 
     def spatial_entropy(self):
         """
@@ -362,22 +360,40 @@ class Forest:
         return tau, r, se
 
 
-    def is_equilibrated(self, window=300, eps=1e-3):
+    def is_equilibrated(self, window=300, eps_density: float = 1e-3, eps_entropy: float = 5e-3,):
         """
         Returns True when the alive-tree count has stabilised:
            (max – min) / mean  <  ε  over the last `window` steps.
         """
         if len(self.alive_trees_hist) < window:
             return False
-        data = np.array(self.alive_trees_hist[-window:], dtype=float)
-        return (np.ptp(data) / data.mean()) < eps
+
+        dens = np.array(self.alive_trees_hist[-window:], dtype=float)
+        ent = np.array(self.entropy_hist[-window:], dtype=float)
+        stable_dens = (np.ptp(dens) / dens.mean()) < eps_density
+        stable_ent = (np.ptp(ent) / ent.mean()) < eps_entropy
+
+        return stable_dens and stable_ent
 
 
 
 def main():
-    RENDER = False
+    RENDER = True
     FOREST_DIMENSIONS = (100, 100)
-    forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4, wind_dir=(1, 1))
+    #forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4, wind_dir=(1, 1))
+    forest = Forest(FOREST_DIMENSIONS,
+            p_tree=0.5,
+            p_grow=1e-3,
+            f_lightning=1e-5,
+            density=30,
+            noise_octaves=30,
+            wind_dir=(0, 0),
+            wind_speed=2.0,
+            radiant_decay=0.4,
+            ignition_base_prob=0.8,
+            max_ignition_distance=3,
+            spotting_prob=0.01,
+            spotting_range=15)
     if RENDER: forest.render_frame()
 
     STEPS = 10000
@@ -388,7 +404,7 @@ def main():
 
     if RENDER:
         frame_dir = "results"
-        with imageio.get_writer("forest_fire.gif", mode="I", duration=0.1) as writer:
+        with imageio.get_writer(f"forest_fire_seed_{forest.seed}.gif", mode="I", duration=0.1) as writer:
             for step in range(STEPS + 1):
                 filename = f"{frame_dir}/frame_{step:04d}.png"
                 image = imageio.imread(filename)

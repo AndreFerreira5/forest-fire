@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "dash>=3.0.4",
     "imageio>=2.37.0",
+    "lhs>=0.4.2",
     "noise>=1.2.2",
     "numpy>=2.2.4",
     "pandas>=2.2.3",
