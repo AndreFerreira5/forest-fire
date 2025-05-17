@@ -20,21 +20,38 @@ class Forest:
             self,
             dimensions,
             p_tree=0.5,
+            p_grow=1e-3,
+            f_lightning=1e-5,
             density=6.0,
             noise_octaves=4,
             seed=0,
             wind_dir=(0, 0),
-            wind_speed=2.0
+            wind_speed=2.0,
+            radiant_decay=0.4,
+            ignition_base_prob=0.8,
+            max_ignition_distance=3,
+            spotting_prob=0.01,
+            spotting_range=15
     ):
-        self.n_steps = 0
+        self.n_steps = 0 # number of steps
+
+        # board
         self.H, self.W = dimensions
         self.board = np.zeros(dimensions)
+
+        # probabilities
         self.p_tree = p_tree
+        self.p_grow = float(p_grow)
+        self.f_lightning = float(f_lightning)
+
+        # noise
         self.scale = density
         self.noise_octaves = noise_octaves
         self.seed = int(seed)
         if self.seed > INT32_MAX:
             self.seed -= 2 * INT32_MAX
+
+        # kernel
         self.kernel = np.ones((3, 3), dtype=np.uint8)
         self.kernel[1,1] = 0
 
@@ -47,18 +64,15 @@ class Forest:
         self.wind_dir = np.asarray(wind_dir, dtype=float)
         self.wind_dir /= np.hypot(*self.wind_dir) + 1e-9 # normalise so that ||wind_dir|| == 1 even if a diagonal is supplied
         self.wind_speed = float(wind_speed)
-        self.wind_vectors = [
 
-        ]
+        # spread parameters
+        self.radiant_decay = radiant_decay # radiant heat decay (nearby cells) - crown
+        self.ignition_base_prob = ignition_base_prob # ignition chance for adjacent cells
+        self.max_ignition_distance = max_ignition_distance # for direct/radiant heat
 
-        # Spread parameters
-        self.radiant_decay = 0.4 # Radiant heat decay (nearby cells) - crown
-        self.ignition_base_prob = 0.8 # Ignition chance for adjacent cells
-        self.max_ignition_distance = 3 # For direct/radiant heat
-
-        # Fire spotting parameters
-        self.spotting_prob = 0.01
-        self.spotting_range = 15
+        # fire spotting parameters
+        self.spotting_prob = spotting_prob
+        self.spotting_range = spotting_range
 
         self.heat_kernel = self.create_heat_kernel()
         self.init_perlin()
@@ -207,6 +221,14 @@ class Forest:
         # Rule 3: Apply fire spotting
         spotting_mask = self.fire_spotting(self.board)
         next_board[spotting_mask] = 2
+
+        # Rule 4: Regrowth
+        grow_mask = (self.board == 3) & (rng.random(self.board.shape) < self.p_grow)
+        next_board[grow_mask] = 1
+
+        # Rule 4: Lightning
+        lightning_mask = (self.board == 1) & (rng.random(self.board.shape) < self.f_lightning)
+        next_board[lightning_mask] = 2
 
         self.board = next_board
 
