@@ -12,7 +12,7 @@ def run_one(param_tuple):
     #while not forest.is_equilibrated():
     for _ in range(100):
         forest.step()
-    print("FINISHED")
+
     metrics = dict(
         p=p, f=f, p_tree=p_tree, density=dens, seed=run_seed,
         rho=np.mean(forest.alive_trees_hist[-300:]),
@@ -44,7 +44,6 @@ if __name__ == "__main__":
         seed = random.randrange(2 ** 31)
         param_space.append((p, f, p_tree, density, seed))
 
-    print(f"{param_space}")
     print(f"{len(param_space)=}")  # 4×4×3×3×5 = 720 runs
 
 
