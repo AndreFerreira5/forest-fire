@@ -1,5 +1,6 @@
 import random
-
+import os
+import matplotlib.pyplot as plt
 import numpy as np
 from noise import pnoise2
 from numpy.f2py.crackfortran import dimensionpattern
@@ -7,6 +8,9 @@ from scipy.signal import convolve2d
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
+import imageio
+from scipy.ndimage import label
+from scipy.stats import linregress
 
 # Seeds for repeatability
 rng = np.random.default_rng(seed=0)
@@ -59,6 +63,14 @@ class Forest:
         self.alive_trees_hist = []
         self.burning_trees_hist = []
         self.burned_trees_hist = []
+        self._prev_burning = 1
+        self.fire_sizes = []
+        self.entropy_hist = []
+        self.R0_hist = []
+        self.largest_cluster_hist = []
+        self.mean_cluster_hist = []
+        self.tau_hist = []
+        self.equil_hist = []
 
         # wind
         self.wind_dir = np.asarray(wind_dir, dtype=float)
@@ -138,13 +150,6 @@ class Forest:
                         mask[ni, nj] = 2
         return mask
 
-
-    def count_neighbors(self):
-        empty_neighbors = convolve2d(self.board == 0, self.kernel, mode='same', boundary='wrap')
-        good_neighbors = convolve2d(self.board == 1, self.kernel, mode='same', boundary='wrap')
-        burning_neighbors = convolve2d(self.board == 2, self.kernel, mode='same', boundary='wrap')
-        burned_neighbors = convolve2d(self.board == 3, self.kernel, mode='same', boundary='wrap')
-        return empty_neighbors, good_neighbors, burning_neighbors, burned_neighbors
 
     def step(self):
         self.n_steps += 1
@@ -232,6 +237,25 @@ class Forest:
 
         self.board = next_board
 
+        # ── fire-event accounting ──────────────────────────────────────────────
+        burning_now = self.burning_trees_hist[-1]
+
+        if self._prev_burning > 0 and burning_now == 0:  # fire just ended
+            burned_this_event = self.burned_trees_hist[-1] - self.burned_trees_hist[-2]
+            if burned_this_event:  # ignore zero-size blips
+                self.fire_sizes.append(int(burned_this_event))
+
+        self._prev_burning = burning_now
+
+        self.entropy_hist.append(self.spatial_entropy())
+        self.R0_hist.append(self.fire_R0())
+        _, cstats = self.cluster_stats()
+        self.largest_cluster_hist.append(cstats["largest_cluster"])
+        self.mean_cluster_hist.append(cstats["mean_cluster"])
+        tau, *_ = self.powerlaw_exponent()
+        self.tau_hist.append(tau)
+        self.equil_hist.append(int(self.is_equilibrated()))
+
 
     def render(self):
         colorscale = [
@@ -263,47 +287,161 @@ class Forest:
         fig.show()
 
 
+    def render_frame(self, save_dir="results"):
+        os.makedirs(save_dir, exist_ok=True)
+
+        cmap = plt.cm.get_cmap("gist_heat", 4)
+        plt.imshow(self.board, cmap=cmap, vmin=0, vmax=3)
+        plt.axis("off")
+
+        plt.title(f"Step {self.n_steps}", fontsize=10)
+
+        plt.savefig(f"{save_dir}/frame_{self.n_steps:04d}.png", bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+
+    def cluster_stats(self):
+        """
+        Returns:
+            sizes (np.ndarray) – 1-D array of all tree-cluster sizes
+            stats (dict)       – {'n_clusters', 'largest', 'mean'}
+        """
+        labels, n_clust = label(self.board == 1, structure=np.ones((3, 3)))
+        if n_clust:
+            sizes = np.bincount(labels.ravel())[1:]  # skip background 0
+            stats = dict(
+                n_clusters=int(n_clust),
+                largest_cluster=int(sizes.max()),
+                mean_cluster=float(sizes.mean()),
+            )
+        else:
+            sizes = np.empty(0, dtype=int)
+            stats = dict(n_clusters=0, largest_cluster=0, mean_cluster=0.0)
+        return sizes, stats
+
+
+    def spatial_entropy(self):
+        """
+        Shannon entropy of the four-state field, in bits (0 = fully ordered).
+        """
+        counts = np.bincount(self.board.ravel().astype(int), minlength=4)
+        probs  = counts / counts.sum()
+        nz     = probs > 0
+        return float(-(probs[nz] * np.log2(probs[nz])).sum())
+
+
+    def fire_R0(self):
+        """
+        R_t = (new burning cells) / (previous burning cells).
+        Returns 0 when no trees are burning at t–1 to avoid division by zero.
+        """
+        if len(self.burning_trees_hist) < 2:
+            return 0.0
+        prev = self.burning_trees_hist[-2]
+        curr = self.burning_trees_hist[-1]
+        return float(curr / prev) if prev else 0.0
+
+
+    def powerlaw_exponent(self, xmin=5):
+        """
+        Ordinary-least-squares estimate of τ in P(s) ~ s^-τ (s ≥ xmin).
+        Returns (tau, r_value, stderr).  Needs at least 5 events.
+        """
+        data = np.array(self.fire_sizes, dtype=float)
+        data = data[data >= xmin]
+        if len(data) < 5:
+            return np.nan, np.nan, np.nan
+        y = np.log10(data)
+        hist, edges = np.histogram(y, bins='auto')  # log-binned
+        cdf = np.cumsum(hist[::-1])[::-1] / hist.sum()
+        x = edges[:-1]  # log10(s)
+        m, _, r, _, se = linregress(x, np.log10(cdf + 1e-12))
+        tau = -m  # slope = –τ
+        return tau, r, se
+
+
+    def is_equilibrated(self, window=300, eps=1e-3):
+        """
+        Returns True when the alive-tree count has stabilised:
+           (max – min) / mean  <  ε  over the last `window` steps.
+        """
+        if len(self.alive_trees_hist) < window:
+            return False
+        data = np.array(self.alive_trees_hist[-window:], dtype=float)
+        return (np.ptp(data) / data.mean()) < eps
+
+
+
 def main():
+    RENDER = False
     FOREST_DIMENSIONS = (100, 100)
     forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4, wind_dir=(1, 1))
-    forest.render()
+    if RENDER: forest.render_frame()
 
-    STEPS = 200
+    STEPS = 10000
     for _ in range(STEPS):
         forest.step()
         #forest.render()
+        if RENDER: forest.render_frame()
 
-    n_steps = list(range(1, STEPS+1))
+    if RENDER:
+        frame_dir = "results"
+        with imageio.get_writer("forest_fire.gif", mode="I", duration=0.1) as writer:
+            for step in range(STEPS + 1):
+                filename = f"{frame_dir}/frame_{step:04d}.png"
+                image = imageio.imread(filename)
+                writer.append_data(image)
 
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=("Alive Trees Over Time", "Burning Trees Over Time", "Burned Trees Over Time"),
-        horizontal_spacing=0.08,
-        vertical_spacing=0.1
+
+    n_steps = np.arange(1, STEPS+1)
+    dash = make_subplots(
+        rows=3, cols=3,
+        subplot_titles=(
+            "Alive Trees", "Burning Trees", "Burned Trees",
+            "Spatial Entropy (bits)", "Fire $R_0$", "Largest Cluster Size",
+            "Mean Cluster Size", "Power-law τ̂", "Equilibrated?"  # last row partly blank
+        ),
+        horizontal_spacing=0.09,
+        vertical_spacing=0.12,
     )
 
-    fig.add_trace(
-        go.Scatter(x=n_steps, y=forest.alive_trees_hist, name="Alive Trees Over Time"),
-        row=1, col=1
-    )
+    def add(line, r, c):
+        dash.add_trace(line, row=r, col=c)
 
-    fig.add_trace(
-        go.Scatter(x=n_steps, y=forest.burning_trees_hist, name="Burning Trees Over Time"),
-        row=1, col=2
-    )
+    add(go.Scatter(x=n_steps, y=forest.alive_trees_hist), 1, 1)
+    add(go.Scatter(x=n_steps, y=forest.burning_trees_hist), 1, 2)
+    add(go.Scatter(x=n_steps, y=forest.burned_trees_hist), 1, 3)
 
-    fig.add_trace(
-        go.Scatter(x=n_steps, y=forest.burned_trees_hist, name="Burned Trees Over Time"),
-        row=2, col=1
-    )
+    add(go.Scatter(x=n_steps, y=forest.entropy_hist), 2, 1)
+    add(go.Scatter(x=n_steps, y=forest.R0_hist), 2, 2)
+    add(go.Scatter(x=n_steps, y=forest.largest_cluster_hist), 2, 3)
 
-    fig.update_layout(
-        title_text="Forest Statistics Over Time",
-        showlegend=False,
-        height=600, width=650
-    )
+    add(go.Scatter(x=n_steps, y=forest.mean_cluster_hist), 3, 1)
+    add(go.Scatter(x=n_steps, y=forest.tau_hist),                     3, 2)
+    add(go.Scatter(x=n_steps, y=forest.equil_hist, mode="lines"),     3, 3)
+    dash.update_yaxes(range=[-0.05, 1.05], row=3, col=3, nticks=2)
 
-    fig.show()
+    dash.update_layout(
+        title_text="Forest-Fire CA: Time-series Dashboard",
+        height=900, width=1000, showlegend=False,
+    )
+    dash.show()
+
+    # cumulative fire-size distribution
+    if forest.fire_sizes:
+        counts, edges = np.histogram(forest.fire_sizes, bins="auto")
+        cdf = np.cumsum(counts[::-1])[::-1]
+        x = edges[:-1]  # left bin edges
+
+        fig_fire = go.Figure(
+            go.Scatter(x=x, y=cdf, mode="lines+markers")
+        )
+        fig_fire.update_layout(
+            title="Cumulative fire-size distribution  (log–log)",
+            xaxis=dict(title="fire size (cells)", type="log"),
+            yaxis=dict(title="P(size ≥ s)", type="log"),
+        )
+        fig_fire.show()
+
 
 
 if __name__ == "__main__":
