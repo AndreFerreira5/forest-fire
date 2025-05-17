@@ -176,3 +176,5 @@ cython_debug/
 uv.lock
 
 **/results/
+**/*.csv
+**/*.gif
