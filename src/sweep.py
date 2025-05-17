@@ -2,6 +2,7 @@ import csv, itertools, multiprocessing as mp
 from forest_ca import Forest
 import numpy as np, itertools, random
 import lhs
+from scipy.stats import qmc
 
 def run_one(param_tuple):
     p, f, p_tree, dens, run_seed = param_tuple
@@ -25,8 +26,8 @@ def run_one(param_tuple):
 N_RUNS = 800
 dim    = 4  # p, f, p_tree, density
 
-# LHS in unit cube
-lhs_points = lhs.lhs(dim, samples=N_RUNS, criterion="maximin")
+sampler = qmc.LatinHypercube(d=dim, seed=0)
+lhs_points = sampler.random(N_RUNS)
 
 # Map unit-cube → real ranges
 def scale(x, lo, hi, log=False):
