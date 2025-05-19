@@ -1,55 +1,79 @@
-import csv, itertools, multiprocessing as mp
+import numpy as np, matplotlib.pyplot as plt, multiprocessing as mp, random, time
+from tqdm import tqdm
 from forest_ca import Forest
-import numpy as np, itertools, random
-import lhs
-from scipy.stats import qmc
+import secrets
 
-def run_one(param_tuple):
-    p, f, p_tree, dens, run_seed = param_tuple
-    forest = Forest((100,100), p_tree=p_tree,
-                    p_grow=p, f_lightning=f,
-                    density=dens, seed=run_seed)
-    #while not forest.is_equilibrated():
-    for _ in range(100):
+# ------------------------------------------------------------------ #
+# 0. quick-test switch                                               #
+# ------------------------------------------------------------------ #
+QUICK_TEST = False        # set False for the full 3 000-step sweep
+STEPS   = 400 if QUICK_TEST else 3_000
+N_SEEDS = 1  if QUICK_TEST else 5
+
+# ------------------------------------------------------------------ #
+# 1. parameter ranges                                                #
+# ------------------------------------------------------------------ #
+p_vals = np.logspace(-5, -2, 5 if QUICK_TEST else 9)
+f_vals = np.logspace(-8, -5, 4 if QUICK_TEST else 7)
+
+FIXED_PARAMS = dict(p_tree=0.4, density=30, noise_octaves=30)
+
+# ------------------------------------------------------------------ #
+def run_one(p, f, seed, timeout=90 if QUICK_TEST else 600):
+    """Return (p, f, metric) or None on timeout."""
+    t0 = time.time()
+    forest = Forest((100, 100), p_grow=p, f_lightning=f,
+                    seed=seed, **FIXED_PARAMS)
+    for _ in range(STEPS):
         forest.step()
+        if time.time() - t0 > timeout:          # safeguard
+            return None
+    metric = np.mean(forest.alive_trees_hist[-STEPS//2:])
+    return (p, f, metric)
 
-    metrics = dict(
-        p=p, f=f, p_tree=p_tree, density=dens, seed=run_seed,
-        rho=np.mean(forest.alive_trees_hist[-300:]),
-        tau=forest.powerlaw_exponent()[0],
-        entropy=forest.entropy_hist[-1],
-        Teq=forest.n_steps,
-        Pmega = np.mean(np.array(forest.fire_sizes) > 0.1*forest.H*forest.W),
-    )
-    return metrics
+# job list ----------------------------------------------------------
+jobs = [(p, f, secrets.randbelow(1_000_000)) for p in p_vals for f in f_vals
+        for _ in range(N_SEEDS)]
 
-N_RUNS = 800
-dim    = 4  # p, f, p_tree, density
+heat   = np.zeros((len(p_vals), len(f_vals)))
+counts = np.zeros_like(heat)
 
-sampler = qmc.LatinHypercube(d=dim, seed=0)
-lhs_points = sampler.random(N_RUNS)
+# ------------------------------------------------------------------ #
+# 2. multiprocessing with progress bar                               #
+# ------------------------------------------------------------------ #
 
-# Map unit-cube → real ranges
-def scale(x, lo, hi, log=False):
-    if log:        return lo * (hi/lo)**x
-    else:          return lo + (hi-lo)*x
-
-if __name__ == "__main__":
-    param_space = []
-    for u in lhs_points:
-        p = scale(u[0], 1e-5, 1e-2, log=True)
-        f = scale(u[1], 1e-8, 1e-5, log=True)
-        p_tree = scale(u[2], 0.25, 0.6)
-        density = int(scale(u[3], 5, 80))
-        seed = random.randrange(2 ** 31)
-        param_space.append((p, f, p_tree, density, seed))
-
-    print(f"{len(param_space)=}")  # 4×4×3×3×5 = 720 runs
+def collect(result):
+    if result is None:        # timed-out worker
+        return
+    p, f, m = result
+    i = np.where(p_vals == p)[0][0]
+    j = np.where(f_vals == f)[0][0]
+    heat[i, j] += m
+    counts[i, j] += 1
+    pbar.update()
 
 
-    with mp.Pool() as pool, open("results.csv","w",newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["p","f","p_tree","density","seed",
-                                           "rho","tau","entropy","Teq","Pmega"])
-        w.writeheader()
-        for row in pool.imap_unordered(run_one, param_space):
-            w.writerow(row)
+with mp.Pool(mp.cpu_count(), maxtasksperchild=10) as pool:
+    with tqdm(total=len(jobs), desc="Simulations") as pbar:
+        for p, f, seed in jobs:
+            pool.apply_async(run_one, (p, f, seed), callback=collect)
+        pool.close()
+        pool.join()
+
+if counts.min() == 0:
+    print("Warning: some grid cells have no completed runs.")
+heat = np.divide(heat, counts, out=np.zeros_like(heat), where=counts>0)
+
+# ------------------------------------------------------------------ #
+# 3. plot                                                            #
+# ------------------------------------------------------------------ #
+fig, ax = plt.subplots(figsize=(6,4))
+im = ax.imshow(heat, origin='lower',
+               extent=[f_vals[0], f_vals[-1], p_vals[0], p_vals[-1]],
+               aspect='auto', cmap='viridis')
+ax.set_xscale('log'); ax.set_yscale('log')
+ax.set_xlabel('f_lightning'); ax.set_ylabel('p_grow')
+fig.colorbar(im, ax=ax, label='mean ρ̄ (last half of run)')
+title = "Quick-test heat-map" if QUICK_TEST else "ρ̄ vs (p_grow, f_lightning)"
+ax.set_title(title)
+plt.tight_layout(); plt.savefig('pf_heatmap.png', dpi=300); plt.show()

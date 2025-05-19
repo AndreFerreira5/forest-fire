@@ -1,6 +1,9 @@
 import random
 import os
+import secrets
+
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, BoundaryNorm
 import numpy as np
 from noise import pnoise2
 from numpy.f2py.crackfortran import dimensionpattern
@@ -12,9 +15,12 @@ import imageio
 from scipy.ndimage import label
 from scipy.stats import linregress
 
+USE_RANDOM_SEED = True
+RANDOM_SEED = secrets.randbelow(1_000_000) if USE_RANDOM_SEED else 0
+
 # Seeds for repeatability
-rng = np.random.default_rng(seed=0)
-random.seed(0)
+rng = np.random.default_rng(seed=RANDOM_SEED)
+random.seed(RANDOM_SEED)
 
 INT32_MAX = 2_147_483_647
 INT32_MIN = -2_147_483_648
@@ -28,7 +34,7 @@ class Forest:
             f_lightning=1e-5,
             density=6.0,
             noise_octaves=4,
-            seed=0,
+            seed=RANDOM_SEED,
             wind_dir=(0, 0),
             wind_speed=2.0,
             radiant_decay=0.4,
@@ -37,8 +43,6 @@ class Forest:
             spotting_prob=0.01,
             spotting_range=15
     ):
-        print(seed)
-
         self.n_steps = 0 # number of steps
 
         # board
@@ -95,7 +99,7 @@ class Forest:
     def init_perlin(self):
         for i in range(self.H):
             for j in range(self.W):
-                n = pnoise2(i/self.scale, j/self.scale, octaves=self.noise_octaves, base=self.seed)
+                n = pnoise2(i/self.scale, j/self.scale, repeatx=self.W, repeaty=self.H, octaves=self.noise_octaves, base=self.seed)
                 self.board[i, j] = 1 if (n + 1)/2 < self.p_tree else 0
 
         # Set a single random tree on fire
@@ -149,7 +153,7 @@ class Forest:
                 if (i + di) < self.H and (j + dj) < self.W:
                     ni, nj = (i + di), (j + dj)
                     if 0 <= ni < self.H and 0 <= nj < self.W:
-                        if mask[ni, nj] == 1:
+                        if board[ni, nj] == 1:
                             mask[ni, nj] = 2
         return mask
 
@@ -236,7 +240,7 @@ class Forest:
         grow_mask = (self.board == 3) & (rng.random(self.board.shape) < self.p_grow)
         next_board[grow_mask] = 1
 
-        # Rule 4: Lightning
+        # Rule 5: Lightning
         lightning_mask = (self.board == 1) & (rng.random(self.board.shape) < self.f_lightning)
         next_board[lightning_mask] = 2
 
@@ -291,17 +295,27 @@ class Forest:
         fig.update_traces(hovertemplate="State: %{z}<extra></extra>")
         fig.show()
 
-
     def render_frame(self, save_dir="results"):
         os.makedirs(save_dir, exist_ok=True)
 
-        cmap = plt.cm.get_cmap("gist_heat", 4)
-        plt.imshow(self.board, cmap=cmap, vmin=0, vmax=3)
-        plt.axis("off")
+        # Discrete colormap: 0=black, 1=forestgreen, 2=orangered, 3=lightgray
+        cmap = ListedColormap([
+            "black",  # 0 empty
+            "forestgreen",  # 1 good tree
+            "orangered",  # 2 burning tree
+            "lightgray",  # 3 burned tree
+        ])
+        # Boundaries between values
+        norm = BoundaryNorm(boundaries=[-0.5, 0.5, 1.5, 2.5, 3.5], ncolors=cmap.N)
 
+        plt.imshow(self.board, cmap=cmap, norm=norm, origin="lower")
+        plt.axis("off")
         plt.title(f"Step {self.n_steps}", fontsize=10)
 
-        plt.savefig(f"{save_dir}/frame_{self.n_steps:04d}.png", bbox_inches='tight', pad_inches=0.1)
+        plt.savefig(
+            f"{save_dir}/frame_{self.n_steps:04d}.png",
+            bbox_inches='tight', pad_inches=0.1
+        )
         plt.close()
 
 
@@ -342,25 +356,32 @@ class Forest:
         return float(curr / prev) if prev else 0.0
 
 
-    def powerlaw_exponent(self, xmin=5):
+    def powerlaw_exponent(self, xmin=5, min_events=8):
         """
         Ordinary-least-squares estimate of τ in P(s) ~ s^-τ (s ≥ xmin).
-        Returns (tau, r_value, stderr).  Needs at least 5 events.
+        Returns (tau, r_value, stderr). NaN if not enough info (needs at least 5 events).
         """
-        data = np.array(self.fire_sizes, dtype=float)
-        data = data[data >= xmin]
-        if len(data) < 5:
+        data = np.asarray([s for s in self.fire_sizes if s >= xmin], dtype=float)
+        if data.size < min_events:  # ❶ need enough fires
             return np.nan, np.nan, np.nan
-        y = np.log10(data)
-        hist, edges = np.histogram(y, bins='auto')  # log-binned
-        cdf = np.cumsum(hist[::-1])[::-1] / hist.sum()
-        x = edges[:-1]  # log10(s)
-        m, _, r, _, se = linregress(x, np.log10(cdf + 1e-12))
-        tau = -m  # slope = –τ
+
+        # build complementary CDF
+        sizes = np.sort(data)
+        ccdf = 1. - np.arange(1, sizes.size + 1) / sizes.size
+
+        # log–log space
+        x = np.log10(sizes)
+        y = np.log10(ccdf + 1e-12)
+
+        # need at least two distinct x values for slope
+        if np.unique(x).size < 2:
+            return np.nan, np.nan, np.nan  # ❷ all fires same size
+
+        m, _, r, _, se = linregress(x, y)
+        tau = -m
         return tau, r, se
 
-
-    def is_equilibrated(self, window=300, eps_density: float = 1e-3, eps_entropy: float = 5e-3,):
+    def is_equilibrated(self, window=20, eps_density: float = 1e-3, eps_entropy: float = 5e-3,):
         """
         Returns True when the alive-tree count has stabilised:
            (max – min) / mean  <  ε  over the last `window` steps.
@@ -371,7 +392,9 @@ class Forest:
         dens = np.array(self.alive_trees_hist[-window:], dtype=float)
         ent = np.array(self.entropy_hist[-window:], dtype=float)
         stable_dens = (np.ptp(dens) / dens.mean()) < eps_density
+        #print(f"alive: {np.ptp(dens) / dens.mean()}")
         stable_ent = (np.ptp(ent) / ent.mean()) < eps_entropy
+        #print(f"entropy: {np.ptp(ent) / ent.mean()}")
 
         return stable_dens and stable_ent
 
@@ -380,11 +403,10 @@ class Forest:
 def main():
     RENDER = True
     FOREST_DIMENSIONS = (100, 100)
-    #forest = Forest(FOREST_DIMENSIONS, density=30, noise_octaves=30, p_tree=0.4, wind_dir=(1, 1))
     forest = Forest(FOREST_DIMENSIONS,
             p_tree=0.5,
-            p_grow=1e-3,
-            f_lightning=1e-5,
+            p_grow=1e-3,# 1e-3
+            f_lightning=1e-5, # 1e-5
             density=30,
             noise_octaves=30,
             wind_dir=(0, 0),
@@ -393,13 +415,15 @@ def main():
             ignition_base_prob=0.8,
             max_ignition_distance=3,
             spotting_prob=0.01,
-            spotting_range=15)
+            spotting_range=15,
+            seed=RANDOM_SEED
+            )
+    forest.render()
     if RENDER: forest.render_frame()
 
-    STEPS = 10000
+    STEPS = 1000
     for _ in range(STEPS):
         forest.step()
-        #forest.render()
         if RENDER: forest.render_frame()
 
     if RENDER:
@@ -409,7 +433,6 @@ def main():
                 filename = f"{frame_dir}/frame_{step:04d}.png"
                 image = imageio.imread(filename)
                 writer.append_data(image)
-
 
     n_steps = np.arange(1, STEPS+1)
     dash = make_subplots(
