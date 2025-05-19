@@ -133,7 +133,7 @@ class Forest:
         mask = np.zeros(board.shape, dtype=bool)
         for i, j in burning_cells:
             if rng.random() < self.spotting_prob:
-                base_distance = rng.triangular(left=2, mode=3, right=self.spotting_range)
+                base_distance = rng.triangular(left=2, mode=10, right=self.spotting_range)
                 angle_variation = rng.uniform(-np.pi / 4, np.pi / 4)  # ±45° around main flow
 
                 # Wind direction in polar form
